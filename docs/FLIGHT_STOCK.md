@@ -3,9 +3,9 @@
 > **Soluzione SaaS per l'acquisto automatico di biglietti aerei a condizioni pre-impostate.**
 > Sistema di *Put/Buy* su voli di linea: l'utente definisce le condizioni di acquisto (ordine condizionato), la piattaforma monitora le tariffe e finalizza l'acquisto quando le condizioni si verificano.
 
-- **Versione documento:** 0.1 (draft)
+- **Versione documento:** 0.2 (draft)
 - **Data:** 2026-07-28
-- **Stato:** In definizione
+- **Stato:** In definizione — decisioni di prodotto iniziali confermate (v. §20)
 
 ---
 
@@ -30,6 +30,7 @@
 17. [Rischi e mitigazioni](#17-rischi-e-mitigazioni)
 18. [Metriche di successo (KPI)](#18-metriche-di-successo-kpi)
 19. [Domande aperte](#19-domande-aperte)
+20. [Decisioni di prodotto confermate](#20-decisioni-di-prodotto-confermate)
 
 ---
 
@@ -66,7 +67,7 @@ I prezzi dei voli di linea sono volatili: oscillano in funzione di domanda, load
 | Termine | Definizione |
 |---|---|
 | **Ordine (Put/Buy Order)** | Insieme di condizioni di acquisto definite dall'utente, con validità temporale e prezzo limite. |
-| **Strike Price** | Prezzo massimo totale (tasse incluse) che l'utente è disposto a pagare. |
+| **Strike Price** | Prezzo massimo **per persona** (tasse incluse) che l'utente è disposto a pagare; il totale dell'ordine è strike × n. passeggeri. |
 | **Trigger** | Evento in cui una tariffa reale soddisfa tutte le condizioni dell'ordine. |
 | **Esecuzione (Fill)** | Acquisto effettivo del biglietto a seguito di un trigger. |
 | **Esecuzione parziale** | Per ordini multi-passeggero: acquisto per un sottoinsieme dei passeggeri (se consentito dall'utente). |
@@ -112,7 +113,7 @@ I prezzi dei voli di linea sono volatili: oscillano in funzione di domanda, load
 
 ### 4.2 Creazione e gestione ordini (RF-ORD)
 
-- **RF-ORD-01** — Creazione ordine con: origine/destinazione (aeroporto o città multi-aeroporto), tipo viaggio (solo andata / A-R), finestra date andata e ritorno (data puntuale o intervallo), n. passeggeri e tipologia (ADT/CHD/INF), classe di viaggio, prezzo limite totale (tasse incluse).
+- **RF-ORD-01** — Creazione ordine con: origine/destinazione (aeroporto o città multi-aeroporto), tipo viaggio (solo andata / A-R), finestra date andata e ritorno (data puntuale o intervallo), n. passeggeri e tipologia (ADT/CHD/INF), classe di viaggio, **prezzo limite per persona** (tasse incluse; il totale dell'ordine è derivato: strike × n. pax) e valuta dell'ordine.
 - **RF-ORD-02** — Vincoli opzionali: max scali (0/1/2), compagnie incluse/escluse, aeroporti di scalo esclusi, durata max viaggio, fasce orarie partenza/arrivo, bagaglio incluso (solo cabin / +hold), tariffe rimborsabili o meno.
 - **RF-ORD-03** — Scelta modalità: **Hard** (auto-buy) o **Soft** (conferma entro N minuti, N configurabile 10–60).
 - **RF-ORD-04** — TTL ordine obbligatorio (max 12 mesi); promemoria prima della scadenza.
@@ -166,7 +167,7 @@ I prezzi dei voli di linea sono volatili: oscillano in funzione di domanda, load
 | **RNF-07** | Audit log immutabile di ogni decisione automatica di acquisto (chi/cosa/quando/a che prezzo/quale quotazione). |
 | **RNF-08** | Osservabilità: tracing distribuito sull'intera pipeline trigger→ticket; alerting su fill fallite. |
 | **RNF-09** | I costi di query verso i provider devono essere misurati per-ordine (unit economics visibili). |
-| **RNF-10** | i18n: IT + EN al lancio; valuta di riferimento EUR, multi-valuta in roadmap. |
+| **RNF-10** | i18n: IT + EN al lancio. **Copertura globale delle rotte fin dall'MVP** (tutte le rotte servite dal provider primario, nessun vincolo geografico); **multi-valuta dal giorno 1**: prezzi e strike nella valuta scelta dall'utente, conversione e settlement gestiti via provider/PSP. |
 
 ---
 
@@ -329,7 +330,7 @@ orders(
   return_window daterange,
   pax jsonb,             -- [{type: ADT, profile_id}, ...]
   cabin,
-  strike_price_cents, currency,
+  strike_price_per_pax_cents, currency,   -- totale ordine = strike × n. pax
   constraints jsonb,     -- scali, compagnie, orari, bagaglio, ...
   soft_confirm_minutes,
   expires_at,
@@ -398,7 +399,7 @@ POST /api/v1/orders
   "return_window": {"nights_min": 2, "nights_max": 3},
   "pax": [{"type": "ADT", "profile_id": "…"}],
   "cabin": "ECONOMY",
-  "strike_price": {"amount_cents": 12000, "currency": "EUR"},
+  "strike_price_per_pax": {"amount_cents": 12000, "currency": "EUR"},
   "constraints": {
     "max_stops": 0,
     "baggage": "CABIN_ONLY",
@@ -521,7 +522,7 @@ Le pre-autorizzazioni carta durano tipicamente **7 giorni** (fino a ~30 per alcu
 Perimetro **volutamente ristretto**:
 
 - Solo **modalità Soft** (conferma entro 30 min) → elimina metà dei rischi di pagamento e legali al lancio.
-- Solo A/R ed one-way su rotte EU coperte dal provider primario; 1–2 passeggeri adulti; EUR.
+- A/R ed one-way su **tutte le rotte coperte dal provider primario, senza vincoli geografici**; 1–2 passeggeri adulti; **multi-valuta** (strike nella valuta dell'utente, insieme iniziale: EUR, USD, GBP — estendibile).
 - Ordini: creazione, modifica, cancellazione, TTL max 3 mesi.
 - Watcher con poll tier fissi (l'adattivo arriva dopo), fare cache, trigger, notifiche push/email.
 - Pagamento alla conferma (PaymentIntent standard on-session): niente MIT nell'MVP.
@@ -538,7 +539,7 @@ Perimetro **volutamente ristretto**:
 
 ### Fase 3 — Espansione
 
-- B2B travel manager; wallet (con partner regolamentato); multi-valuta; mercati extra-EU.
+- B2B travel manager; wallet (con partner regolamentato); valute aggiuntive e localizzazioni oltre IT/EN.
 - Feature avanzate: ordini "trailing" (strike che segue il minimo osservato), bundle A/R su carrier diversi.
 
 ---
@@ -578,12 +579,26 @@ Perimetro **volutamente ristretto**:
 ## 19. Domande aperte
 
 1. **Naming della promessa**: "compriamo appena il prezzo scende sotto X" vs "garantiamo"? La parola *garanzia* è da evitare finché il fill rate reale non è noto.
-2. Soft-only nell'MVP è confermato, o il segmento target (frequent flyer) pretende Hard subito?
-3. Prezzo limite **totale per tutti i pax** o **per persona**? (Proposta: per persona, più intuitivo; il totale si deriva.)
-4. Esecuzione parziale multi-pax: opt-in esplicito o mai nell'MVP?
-5. Mercato iniziale: solo Italia (lingua, rotte, marketing) o EU da subito?
-6. Il TTL massimo di 12 mesi è compatibile con le finestre di prenotazione dei carrier (~330 giorni)? Allineare.
-7. Ordini "trailing stop" (compra se risale del X % dal minimo): differibile a fase 3 ma influisce sul modello dati dei trigger — decidere ora se predisporre.
+2. Esecuzione parziale multi-pax: opt-in esplicito o mai nell'MVP?
+3. Il TTL massimo di 12 mesi è compatibile con le finestre di prenotazione dei carrier (~330 giorni)? Allineare.
+4. Ordini "trailing stop" (compra se risale del X % dal minimo): differibile a fase 3 ma influisce sul modello dati dei trigger — decidere ora se predisporre.
+5. Copertura globale da subito: quali valute nel set iniziale oltre EUR/USD/GBP, e con quale strategia di conversione (tasso PSP vs tasso provider) quando la valuta della tariffa differisce da quella dello strike?
+
+---
+
+## 20. Decisioni di prodotto confermate
+
+Registro delle decisioni prese con il product owner (2026-07-28):
+
+| # | Decisione | Scelta confermata |
+|---|---|---|
+| D1 | Natura del prodotto | **Ordine di acquisto automatico a soglia** (limit order sui voli): niente lock-fare, niente opzione finanziaria, niente inventario pre-acquistato. |
+| D2 | Modalità di esecuzione | **Entrambe (Hard e Soft), a scelta dell'utente per ordine.** Nell'MVP si parte **Soft-only**; la modalità Hard arriva in fase 2. |
+| D3 | Target | **Consumer (B2C)** per l'MVP; B2B eventuale in fasi successive. |
+| D4 | Monetizzazione | **Success fee solo a esecuzione avvenuta.** Nessuna fee alla creazione ordine, nessun markup sul biglietto. |
+| D5 | Strike price | **Per persona**, tasse incluse; il totale dell'ordine è derivato (strike × pax). |
+| D6 | Mercato | **Globale da subito**: nessun vincolo geografico sulle rotte, multi-valuta dal giorno 1 (lingue al lancio: IT + EN). |
+| D7 | Low-cost carrier | **Utili ma non bloccanti**: MVP con i vettori coperti dal provider primario e copertura dichiarata in modo trasparente; estensione low-cost in fase 2. |
 
 ---
 
