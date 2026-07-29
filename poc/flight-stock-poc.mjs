@@ -20,7 +20,7 @@
  *   node flight-stock-poc.mjs                        # mock, percorso felice
  *   node flight-stock-poc.mjs --fail-issuance        # mock, demo compensazione
  *   node flight-stock-poc.mjs --strike 5000          # strike 50.00 EUR/pax
- *   DUFFEL_API_KEY=... STRIPE_SECRET_KEY=... node flight-stock-poc.mjs
+ *   DUFFEL_API_KEY=duffel_test_... STRIPE_SECRET_KEY=sk_test_... node flight-stock-poc.mjs
  */
 
 const args = process.argv.slice(2);
