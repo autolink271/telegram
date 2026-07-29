@@ -42,6 +42,8 @@ const order = {
   cabin: "economy",
   strikePerPaxCents: parseInt(opt("strike", "12000"), 10), // 120.00
   currency: "EUR",
+  maxStops: parseInt(opt("max-stops", "1"), 10),            // 0|1|2
+  maxDurationMinutes: parseInt(opt("max-duration", "420"), 10), // per tratta
   mode: "SOFT",
 };
 
@@ -60,6 +62,19 @@ function nextFriday() {
 
 const eur = (cents) => `${(cents / 100).toFixed(2)} ${order.currency}`;
 const log = (step, msg) => console.log(`[${step}] ${msg}`);
+
+// "PT4H30M" → minuti (formato durate Duffel)
+const isoMinutes = (s) => {
+  const m = /PT(?:(\d+)H)?(?:(\d+)M)?/.exec(s ?? "");
+  return m && (m[1] || m[2]) ? (parseInt(m[1] ?? "0", 10) * 60 + parseInt(m[2] ?? "0", 10)) : Infinity;
+};
+
+// Scali e durata dell'offerta, valutati sulla tratta peggiore
+const itinerary = (offer) => ({
+  stops: Math.max(...offer.slices.map((s) => (s.segments?.length ?? 1) - 1)),
+  minutes: Math.max(...offer.slices.map((s) => isoMinutes(s.duration))),
+});
+const fmtDur = (min) => `${Math.floor(min / 60)}h${String(min % 60).padStart(2, "0")}`;
 
 // ---------------------------------------------------------------------------
 // Client Duffel (REST, nessuna dipendenza) + variante mock
@@ -112,19 +127,31 @@ function realDuffel(apiKey) {
 }
 
 function mockDuffel() {
-  const mkOffer = (id, cents) => ({
-    id,
-    owner: { iata_code: "TP", name: "TAP Air Portugal" },
-    total_amount: (cents / 100).toFixed(2),
-    total_currency: order.currency,
-    passengers: [{ id: "pas_mock_1" }],
-  });
-  const fares = { off_mock_high: 16300, off_mock_ok: 10950, off_mock_mid: 12800 };
+  const catalog = {
+    off_mock_high: { cents: 16300, stops: 0, minutes: 170 }, // diretto ma caro
+    off_mock_ok:   { cents: 10950, stops: 1, minutes: 370 }, // 1 scalo, 6h10 ✓
+    off_mock_mid:  { cents: 12800, stops: 0, minutes: 165 }, // diretto, sopra strike
+    off_mock_slow: { cents:  9500, stops: 2, minutes: 680 }, // economico ma 2 scali, 11h20
+  };
+  const mkOffer = (id) => {
+    const { cents, stops, minutes } = catalog[id];
+    return {
+      id,
+      owner: { iata_code: "TP", name: "TAP Air Portugal" },
+      total_amount: (cents / 100).toFixed(2),
+      total_currency: order.currency,
+      slices: [{
+        duration: `PT${Math.floor(minutes / 60)}H${minutes % 60}M`,
+        segments: Array.from({ length: stops + 1 }, (_, i) => ({ id: `seg_${id}_${i}` })),
+      }],
+      passengers: [{ id: "pas_mock_1" }],
+    };
+  };
   return {
-    searchOffers: async () => Object.entries(fares).map(([id, cents]) => mkOffer(id, cents)),
+    searchOffers: async () => Object.keys(catalog).map(mkOffer),
     priceConfirm: async (offerId) =>
       // Al re-pricing live il prezzo può essere cambiato: qui resta valido.
-      mkOffer(offerId, fares[offerId]),
+      mkOffer(offerId),
     createOrder: async (offer) => {
       if (FAIL_ISSUANCE) throw new Error("mock: il vettore ha rifiutato l'emissione (posti esauriti)");
       return { id: "ord_duffel_mock", booking_reference: "ABC123", offer_id: offer.id };
@@ -184,36 +211,53 @@ function mockStripe() {
 async function main() {
   console.log(`Flight Stock PoC — modalità ${MOCK ? "MOCK (simulata)" : "SANDBOX (API reali di test)"}\n`);
   log("ordine", `${order.origin} → ${order.destination} il ${order.departDate}, ` +
-    `${order.pax} pax, strike ${eur(order.strikePerPaxCents)}/pax (id ${order.id})`);
+    `${order.pax} pax, strike ${eur(order.strikePerPaxCents)}/pax, ` +
+    `max ${order.maxStops} scali, durata max ${fmtDur(order.maxDurationMinutes)} (id ${order.id})`);
 
   // 1. Ricerca
   const offers = await duffel.searchOffers();
   log("ricerca", `${offers.length} offerte trovate`);
   for (const o of offers) {
-    log("ricerca", `  ${o.id} — ${o.owner?.name ?? "?"} — ${o.total_amount} ${o.total_currency}`);
+    const it = itinerary(o);
+    log("ricerca", `  ${o.id} — ${o.owner?.name ?? "?"} — ${o.total_amount} ${o.total_currency}` +
+      ` — ${it.stops} scali, ${fmtDur(it.minutes)}`);
   }
 
-  // 2. Filtro sullo strike (per persona)
-  const withinStrike = offers
-    .map((o) => ({ ...o, perPaxCents: Math.round((parseFloat(o.total_amount) * 100) / order.pax) }))
-    .filter((o) => o.perPaxCents <= order.strikePerPaxCents && o.total_currency === order.currency)
+  // 2. Filtro sulle condizioni dell'ordine: strike per persona, scali, durata (RF-ORD-01)
+  const eligible = offers
+    .map((o) => ({ ...o, perPaxCents: Math.round((parseFloat(o.total_amount) * 100) / order.pax), it: itinerary(o) }))
+    .filter((o) => {
+      const reasons = [];
+      if (o.total_currency !== order.currency) reasons.push(`valuta ${o.total_currency}`);
+      if (o.perPaxCents > order.strikePerPaxCents) reasons.push(`prezzo ${eur(o.perPaxCents)} > strike`);
+      if (o.it.stops > order.maxStops) reasons.push(`${o.it.stops} scali > max ${order.maxStops}`);
+      if (o.it.minutes > order.maxDurationMinutes) reasons.push(`durata ${fmtDur(o.it.minutes)} > max ${fmtDur(order.maxDurationMinutes)}`);
+      if (reasons.length) log("filtro", `  esclusa ${o.id}: ${reasons.join(", ")}`);
+      return reasons.length === 0;
+    })
     .sort((a, b) => a.perPaxCents - b.perPaxCents);
 
-  if (withinStrike.length === 0) {
-    log("filtro", `nessuna offerta ≤ strike: l'ordine resta ACTIVE, si continua a monitorare`);
+  if (eligible.length === 0) {
+    log("filtro", `nessuna offerta soddisfa tutte le condizioni: l'ordine resta ACTIVE, si continua a monitorare`);
     return;
   }
-  const candidate = withinStrike[0];
-  log("trigger", `offerta ${candidate.id} a ${eur(candidate.perPaxCents)}/pax ≤ strike → TRIGGERED`);
+  const candidate = eligible[0];
+  log("trigger", `offerta ${candidate.id} a ${eur(candidate.perPaxCents)}/pax, ` +
+    `${candidate.it.stops} scali, ${fmtDur(candidate.it.minutes)} — tutte le condizioni soddisfatte → TRIGGERED`);
 
   // 3. Verifica live: la cache decide quando guardare, mai cosa comprare (RF-EXE-02)
   const live = await duffel.priceConfirm(candidate.id);
   const liveCents = Math.round((parseFloat(live.total_amount) * 100) / order.pax);
+  const liveIt = itinerary(live);
   if (liveCents > order.strikePerPaxCents) {
     log("verifica", `prezzo live ${eur(liveCents)} > strike: niente acquisto, ordine di nuovo ACTIVE`);
     return;
   }
-  log("verifica", `prezzo confermato live: ${eur(liveCents)}/pax — si procede`);
+  if (liveIt.stops > order.maxStops || liveIt.minutes > order.maxDurationMinutes) {
+    log("verifica", `itinerario live fuori condizioni (${liveIt.stops} scali, ${fmtDur(liveIt.minutes)}): niente acquisto`);
+    return;
+  }
+  log("verifica", `confermato live: ${eur(liveCents)}/pax, ${liveIt.stops} scali, ${fmtDur(liveIt.minutes)} — si procede`);
 
   // 4. Pre-autorizzazione fondi (nessuna cattura prima dell'emissione)
   const totalCents = Math.round(parseFloat(live.total_amount) * 100);

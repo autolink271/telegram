@@ -3,7 +3,7 @@
 > **Soluzione SaaS per l'acquisto automatico di biglietti aerei a condizioni pre-impostate.**
 > Sistema di *Put/Buy* su voli di linea: l'utente definisce le condizioni di acquisto (ordine condizionato), la piattaforma monitora le tariffe e finalizza l'acquisto quando le condizioni si verificano.
 
-- **Versione documento:** 0.2 (draft)
+- **Versione documento:** 0.3 (draft)
 - **Data:** 2026-07-28
 - **Stato:** In definizione — decisioni di prodotto iniziali confermate (v. §20)
 
@@ -113,8 +113,8 @@ I prezzi dei voli di linea sono volatili: oscillano in funzione di domanda, load
 
 ### 4.2 Creazione e gestione ordini (RF-ORD)
 
-- **RF-ORD-01** — Creazione ordine con: origine/destinazione (aeroporto o città multi-aeroporto), tipo viaggio (solo andata / A-R), finestra date andata e ritorno (data puntuale o intervallo), n. passeggeri e tipologia (ADT/CHD/INF), classe di viaggio, **prezzo limite per persona** (tasse incluse; il totale dell'ordine è derivato: strike × n. pax) e valuta dell'ordine.
-- **RF-ORD-02** — Vincoli opzionali: max scali (0/1/2), compagnie incluse/escluse, aeroporti di scalo esclusi, durata max viaggio, fasce orarie partenza/arrivo, bagaglio incluso (solo cabin / +hold), tariffe rimborsabili o meno.
+- **RF-ORD-01** — Creazione ordine con: origine/destinazione (aeroporto o città multi-aeroporto), tipo viaggio (solo andata / A-R), finestra date andata e ritorno (data puntuale o intervallo), n. passeggeri e tipologia (ADT/CHD/INF), classe di viaggio, **prezzo limite per persona** (tasse incluse; il totale dell'ordine è derivato: strike × n. pax), valuta dell'ordine, **numero massimo di scali** (0/1/2, campo obbligatorio, default 1) e **durata massima del viaggio** per tratta (campo obbligatorio con default proposto in base alla rotta, es. durata del volo diretto + 50 %).
+- **RF-ORD-02** — Vincoli opzionali: compagnie incluse/escluse, aeroporti di scalo esclusi, fasce orarie partenza/arrivo, bagaglio incluso (solo cabin / +hold), tariffe rimborsabili o meno.
 - **RF-ORD-03** — Scelta modalità: **Hard** (auto-buy) o **Soft** (conferma entro N minuti, N configurabile 10–60).
 - **RF-ORD-04** — TTL ordine obbligatorio (max 12 mesi); promemoria prima della scadenza.
 - **RF-ORD-05** — Modifica ordine consentita finché non in stato `TRIGGERED`; la modifica del prezzo limite in Hard mode richiede aggiornamento della pre-autorizzazione.
@@ -331,7 +331,9 @@ orders(
   pax jsonb,             -- [{type: ADT, profile_id}, ...]
   cabin,
   strike_price_per_pax_cents, currency,   -- totale ordine = strike × n. pax
-  constraints jsonb,     -- scali, compagnie, orari, bagaglio, ...
+  max_stops smallint not null default 1,       -- 0|1|2
+  max_duration_minutes int not null,           -- durata max per tratta
+  constraints jsonb,     -- compagnie, orari, bagaglio, ...
   soft_confirm_minutes,
   expires_at,
   payment_intent_id,     -- pre-autorizzazione PSP
@@ -400,8 +402,9 @@ POST /api/v1/orders
   "pax": [{"type": "ADT", "profile_id": "…"}],
   "cabin": "ECONOMY",
   "strike_price_per_pax": {"amount_cents": 12000, "currency": "EUR"},
+  "max_stops": 0,
+  "max_duration_minutes": 240,
   "constraints": {
-    "max_stops": 0,
     "baggage": "CABIN_ONLY",
     "excluded_carriers": [],
     "depart_after": "06:00"
@@ -599,6 +602,7 @@ Registro delle decisioni prese con il product owner (2026-07-28):
 | D5 | Strike price | **Per persona**, tasse incluse; il totale dell'ordine è derivato (strike × pax). |
 | D6 | Mercato | **Globale da subito**: nessun vincolo geografico sulle rotte, multi-valuta dal giorno 1 (lingue al lancio: IT + EN). |
 | D7 | Low-cost carrier | **Utili ma non bloccanti**: MVP con i vettori coperti dal provider primario e copertura dichiarata in modo trasparente; estensione low-cost in fase 2. |
+| D8 | Scali e durata | **Numero massimo di scali e durata massima del viaggio sono campi standard** richiesti alla creazione di ogni ordine (non vincoli opzionali): il sistema non acquista mai un itinerario che li violi. |
 
 ---
 
